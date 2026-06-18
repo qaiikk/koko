@@ -305,7 +305,7 @@ def download_video(youtube_url: str, job_dir: Path) -> Path:
 
     # Download to cache (retries + alt clients are baked into base args)
     cmd = yt_dlp_base_args() + [
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best[height<=1080]/best",
+        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
         "--merge-output-format", "mp4",
         "-o", str(cached_path),
         "--no-playlist",
