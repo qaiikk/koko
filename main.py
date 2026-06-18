@@ -22,13 +22,33 @@ from pathlib import Path
 from typing import Optional, AsyncGenerator
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 import config
 
 app = FastAPI(title="YouTube Shorts Trimmer")
+
+
+@app.middleware("http")
+async def normalize_path(request: Request, call_next):
+    """Collapse duplicate slashes (e.g. //api/process -> /api/process).
+
+    Some frontends build URLs like `${BASE}/api/process` where BASE ends with
+    '/', producing '//api...' which FastAPI routes as 404. This makes those
+    work transparently.
+    """
+    scope = request.scope
+    path = scope["path"]
+    if "//" in path:
+        # Collapse runs of slashes, but keep a single leading slash.
+        collapsed = "/" + "/".join(seg for seg in path.split("/") if seg)
+        scope["path"] = collapsed
+        # raw_path is used by routing too; keep them consistent.
+        scope["raw_path"] = collapsed.encode("ascii", "ignore")
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
