@@ -152,17 +152,65 @@ def cleanup_old_jobs(keep_job_id: Optional[str] = None):
 
 # ─── Download / Upload ───────────────────────────────────────────────────────
 
+def _detect_js_runtime() -> Optional[str]:
+    """Find an available JS runtime for yt-dlp (deno > bun > node)."""
+    import shutil as _sh
+    for name in ("deno", "bun", "node", "nodejs"):
+        if _sh.which(name):
+            return name
+    return None
+
+
+# Cached at first use so we don't run `which` on every call.
+_JS_RUNTIME: Optional[str] = None
+
+
+def _js_runtime() -> Optional[str]:
+    global _JS_RUNTIME
+    if _JS_RUNTIME is None:
+        _JS_RUNTIME = _detect_js_runtime()
+    return _JS_RUNTIME
+
+
+def yt_dlp_base_args() -> list[str]:
+    """Common yt-dlp flags shared by every call.
+
+    - Picks whichever JS runtime is installed (instead of hardcoding `node`),
+      which fixes: "No supported JavaScript runtime could be found."
+    - Uses alternative YouTube player clients (android/ios/web) and retries
+      with linear backoff, which mitigates: "HTTP Error 429: Too Many Requests"
+      from Railway's shared egress IPs hitting the web player.
+    """
+    args = [
+        "yt-dlp",
+        "--no-update",
+        "--no-warnings",
+        # Use non-web clients first to dodge the web 429 throttle.
+        "--extractor-args", "youtube:player_client=android,ios,web_default,web",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        # Linear backoff between 5s and 30s — smooths out transient 429s.
+        "--retry-sleep", "linear=5..30",
+        # YouTube is increasingly aggressive about bot detection.
+        "--force-user-agent",
+        "--no-check-certificates",
+    ]
+
+    runtime = _js_runtime()
+    if runtime:
+        args += ["--js-runtimes", runtime]
+    return args
+
+
 def fetch_video_metadata(youtube_url: str) -> dict:
     """Fetch video title and thumbnail from YouTube."""
     try:
-        cmd = [
-            "yt-dlp", "--no-update",
-            "--js-runtimes", "node",
-            "--remote-components", "ejs:github",
-            "--skip-download", "--print", "%(title)s\n%(thumbnail)s\n%(channel)s\n%(duration)s",
+        cmd = yt_dlp_base_args() + [
+            "--skip-download",
+            "--print", "%(title)s\n%(thumbnail)s\n%(channel)s\n%(duration)s",
             "--no-playlist", youtube_url,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, start_new_session=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, start_new_session=True)
         if result.returncode == 0:
             lines = result.stdout.strip().split("\n")
             return {
@@ -196,12 +244,8 @@ def download_video(youtube_url: str, job_dir: Path) -> Path:
             os.symlink(cached.resolve(), job_video)
         return job_video
 
-    # Download to cache
-    cmd = [
-        "yt-dlp",
-        "--no-update",
-        "--js-runtimes", "node",
-        "--remote-components", "ejs:github",
+    # Download to cache (retries + alt clients are baked into base args)
+    cmd = yt_dlp_base_args() + [
         "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
         "--merge-output-format", "mp4",
         "-o", str(cached_path),
@@ -250,10 +294,7 @@ def fetch_youtube_captions(youtube_url: str, job_dir: Path) -> Optional[list[dic
     Never raises — callers handle the None case with a clear error.
     """
     out_base = job_dir / "captions"
-    cmd = [
-        "yt-dlp", "--no-update",
-        "--js-runtimes", "node",
-        "--remote-components", "ejs:github",
+    cmd = yt_dlp_base_args() + [
         "--write-subs", "--write-auto-subs",
         "--sub-langs", "en.*,en",
         "--sub-format", "json3/srv3/vtt/srt/best",
@@ -263,7 +304,7 @@ def fetch_youtube_captions(youtube_url: str, job_dir: Path) -> Optional[list[dic
         youtube_url,
     ]
     try:
-        run_cmd(cmd, timeout=60)
+        run_cmd(cmd, timeout=90)
     except Exception:
         return None
 
