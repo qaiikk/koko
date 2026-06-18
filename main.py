@@ -217,11 +217,12 @@ def _cookies_path() -> Optional[Path]:
 
 def _is_bot_block(stderr: str) -> bool:
     """Detect YouTube's 'Sign in to confirm you're not a bot' error in yt-dlp output."""
-    return any(phrase in stderr for phrase in [
-        "Sign in to confirm you're not a bot",
+    lower = stderr.lower()
+    return any(phrase in lower for phrase in [
         "sign in to confirm",
         "bot detection",
-        "ConsentRequired",
+        "consentrequired",
+        "use --cookies-from-browser or --cookies",
     ])
 
 
@@ -232,13 +233,23 @@ def yt_dlp_base_args() -> list[str]:
       where YouTube blocks datacenter IPs with "Sign in to confirm you're not a bot").
     - Picks whichever JS runtime is installed (instead of hardcoding `node`).
     - Uses alternative YouTube player clients and retries with linear backoff.
+    - Passes PO token + visitor_data if configured (bypasses datacenter IP blocking).
     """
+    # Build extractor-args dynamically based on available auth config
+    yt_ext_parts = ["player_client=mediaconnect,web_creator,web"]
+
+    visitor_data = getattr(config, "YOUTUBE_VISITOR_DATA", "")
+    po_token = getattr(config, "YOUTUBE_PO_TOKEN", "")
+    if visitor_data:
+        yt_ext_parts.append(f"visitor_data={visitor_data}")
+    if po_token:
+        # PO token is scoped to a specific player client (usually web_creator)
+        yt_ext_parts.append(f"po_token=web_creator.{po_token}")
+
     args = [
         "yt-dlp",
-        "--no-update",
         "--no-warnings",
-        # Use reliable web clients that return the widest format selection.
-        "--extractor-args", "youtube:player_client=web_creator,web,mweb",
+        "--extractor-args", ";".join(yt_ext_parts),
         "--retries", "10",
         "--fragment-retries", "10",
         # Linear backoff (5s → 30s, 1s steps) between retries.

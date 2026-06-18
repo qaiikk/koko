@@ -6,6 +6,10 @@
 # Strip CR from any CRLF this file may have picked up on Windows.
 [ -n "${LF_FIX:-}" ] || true
 
+# Self-update yt-dlp to latest nightly (bypasses YouTube bot detection)
+echo "Checking for yt-dlp updates..."
+python -m yt_dlp -U 2>/dev/null || yt-dlp -U 2>/dev/null || echo "yt-dlp update skipped"
+
 PORT="${PORT:-${BACKEND_PORT:-8000}}"
 HOST="${HOST:-0.0.0.0}"
 

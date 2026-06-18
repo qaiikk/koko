@@ -26,6 +26,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Upgrade yt-dlp to nightly for latest YouTube bot-detection bypasses
+RUN pip install --no-cache-dir --upgrade --force-reinstall "yt-dlp[default]@https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz"
+
 # App code + entrypoint
 COPY . .
 
