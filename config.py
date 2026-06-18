@@ -8,8 +8,13 @@ OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY", os.getenv("OPENAI_API_KEY", "")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./output")
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 
+# Raw YouTube cookie string (Netscape format content).
+# If set, this takes priority over COOKIES_FILE and is written to disk automatically.
+# You can paste the full contents of a cookies.txt export here as a single env var.
+YOUTUBE_COOKIE = os.getenv("YOUTUBE_COOKIE", "")
+
 # Path to a YouTube cookies.txt file (Netscape format).
-# Set this as a Railway env var pointing to a persistent file, or upload via /api/cookies.
+# Used as fallback when YOUTUBE_COOKIE is not set, or upload via /api/cookies.
 COOKIES_FILE = Path(os.getenv("COOKIES_FILE", "./cookies.txt"))
 
 # When True, all previously generated job outputs are deleted automatically

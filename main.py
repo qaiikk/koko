@@ -189,7 +189,23 @@ def _js_runtime() -> Optional[str]:
 
 
 def _cookies_path() -> Optional[Path]:
-    """Return the path to cookies.txt if it exists and is non-empty."""
+    """Return the path to cookies.txt if it exists and is non-empty.
+
+    If the YOUTUBE_COOKIE env var is set, its content is written to
+    COOKIES_FILE automatically (takes priority over any existing file).
+    """
+    # Priority 1: raw cookie string from env var
+    raw = getattr(config, "YOUTUBE_COOKIE", "")
+    if raw:
+        p = Path(config.COOKIES_FILE)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Auto-convert JSON cookie export to Netscape format if needed
+        converted = _json_cookies_to_netscape(raw)
+        content = converted if converted else raw
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    # Priority 2: existing file on disk (manual upload or file placement)
     cp = getattr(config, "COOKIES_FILE", None)
     if not cp:
         return None
@@ -866,31 +882,86 @@ async def get_styles():
 
 # ─── Cookies Management ───────────────────────────────────────────────────────
 
+def _json_cookies_to_netscape(json_content: str) -> str:
+    """Convert Chrome/JSON cookie export to Netscape cookies.txt format.
+
+    Accepts both raw JSON arrays (from cookie editor extensions / DevTools copy)
+    and single JSON objects. Output is compatible with yt-dlp --cookies.
+    """
+    try:
+        data = json.loads(json_content)
+    except json.JSONDecodeError:
+        return None  # Not JSON at all — let it pass through as-is
+
+    # Handle both a single object and an array of objects
+    if isinstance(data, dict) and "name" in data and "value" in data:
+        data = [data]
+    if not isinstance(data, list):
+        return None
+
+    lines = ["# Netscape HTTP Cookie File\n# Converted from JSON by YouTube Shorts Trimmer\n"]
+    for cookie in data:
+        name = cookie.get("name", "")
+        value = cookie.get("value", "")
+        domain = cookie.get("domain", "")
+        path = cookie.get("path", "/")
+        # yt-dlp Netscape format: hostOnly prefix ".domain" means include subdomains
+        host_flag = "TRUE" if domain.startswith(".") else "FALSE"
+        secure = "TRUE" if cookie.get("secure", False) else "FALSE"
+        # expiration: epoch seconds (0 for session cookies)
+        exp = int(cookie.get("expirationDate", 0))
+        # Skip cookies with no domain or empty name
+        if not domain or not name:
+            continue
+        lines.append(
+            f"{domain}\t{host_flag}\t{path}\t{secure}\t{exp}\t{name}\t{value}"
+        )
+    result = "\n".join(lines) + "\n"
+    # Only return if we actually converted at least one cookie
+    if len(lines) > 3:
+        return result
+    return None
+
+
 @app.post("/api/cookies")
 async def upload_cookies(file: UploadFile = File(...)):
-    """Upload a YouTube cookies.txt file (Netscape format).
+    """Upload a YouTube cookies file.
+
+    Accepts two formats:
+      1. Netscape cookies.txt (from "Get cookies.txt LOCALLY" extension)
+      2. JSON cookie export (from Chrome DevTools / cookie editor extensions)
+         — auto-converted to Netscape format on upload.
 
     Required for cloud/Railway deployments where YouTube blocks datacenter IPs.
-    Generate cookies.txt from your browser using an extension like
-    "Get cookies.txt LOCALLY" (export from youtube.com while logged in).
-
-    The file is saved to the persistent path configured by COOKIES_FILE.
     """
     if not file.filename:
         raise HTTPException(400, "No file provided")
 
+    # Read the upload content
+    raw = file.file.read()
+    if not raw:
+        raise HTTPException(400, "Uploaded file is empty")
+
+    content = raw.decode("utf-8", errors="replace")
+
+    # If it looks like JSON, convert to Netscape format automatically
+    converted = _json_cookies_to_netscape(content)
+    if converted:
+        content = converted
+
     cookies_path = Path(config.COOKIES_FILE)
     cookies_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cookies_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    with open(cookies_path, "w", encoding="utf-8") as f:
+        f.write(content)
 
     if cookies_path.stat().st_size == 0:
         cookies_path.unlink(missing_ok=True)
         raise HTTPException(400, "Uploaded cookies file is empty")
 
+    was_converted = " (converted from JSON)" if converted else ""
     return {
         "status": "ok",
-        "message": f"Cookies saved ({cookies_path.stat().st_size} bytes). YouTube downloads should now work.",
+        "message": f"Cookies saved ({cookies_path.stat().st_size} bytes){was_converted}. YouTube downloads should now work.",
         "path": str(cookies_path),
     }
 
@@ -898,20 +969,22 @@ async def upload_cookies(file: UploadFile = File(...)):
 @app.get("/api/cookies")
 async def cookies_status():
     """Check if cookies are loaded and active."""
+    from_env = bool(getattr(config, "YOUTUBE_COOKIE", ""))
     cp = _cookies_path()
     if cp:
         return {
             "status": "loaded",
             "message": "YouTube cookies are active.",
+            "source": "env (YOUTUBE_COOKIE)" if from_env else "file",
             "path": str(cp),
             "size_bytes": cp.stat().st_size,
         }
     return {
         "status": "missing",
         "message": (
-            "No cookies.txt found. YouTube downloads will likely fail with "
+            "No cookies found. YouTube downloads will likely fail with "
             "'Sign in to confirm you're not a bot' on cloud/Railway deployments. "
-            "Upload a cookies.txt via POST /api/cookies."
+            "Set the YOUTUBE_COOKIE env var, or upload a cookies.txt via POST /api/cookies."
         ),
         "path": str(config.COOKIES_FILE),
     }
