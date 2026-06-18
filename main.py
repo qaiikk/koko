@@ -249,7 +249,7 @@ def yt_dlp_base_args() -> list[str]:
     args = [
         "yt-dlp",
         "--no-warnings",
-        "--extractor-args", ";".join(yt_ext_parts),
+        "--extractor-args", "youtube:" + ";".join(yt_ext_parts),
         "--retries", "10",
         "--fragment-retries", "10",
         # Linear backoff (5s → 30s, 1s steps) between retries.
