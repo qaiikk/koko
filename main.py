@@ -95,7 +95,7 @@ def run_cmd(cmd: list[str], cwd: Optional[str] = None, timeout: int = 600) -> su
                 "or include it with your request. "
                 "See: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
             )
-        raise RuntimeError(f"Command failed: {' '.join(cmd[:3])}...\n{result.stderr[:500]}")
+        raise RuntimeError(f"Command failed: {' '.join(cmd[:3])}...\nstdout: {result.stdout[-500:]}\nstderr: {result.stderr[-1000:]}")
     return result
 
 
@@ -237,8 +237,8 @@ def yt_dlp_base_args() -> list[str]:
         "yt-dlp",
         "--no-update",
         "--no-warnings",
-        # Use non-web clients first to dodge the web 429 throttle.
-        "--extractor-args", "youtube:player_client=android,ios,web_default,web",
+        # Use reliable web clients that return the widest format selection.
+        "--extractor-args", "youtube:player_client=web_creator,web,mweb",
         "--retries", "10",
         "--fragment-retries", "10",
         # Linear backoff (5s → 30s, 1s steps) between retries.
@@ -304,9 +304,10 @@ def download_video(youtube_url: str, job_dir: Path) -> Path:
         return job_video
 
     # Download to cache (retries + alt clients are baked into base args)
+    # Use -S (format sorting) so yt-dlp picks the best available combo automatically.
+    # This avoids "Requested format not available" errors by letting yt-dlp decide.
     cmd = yt_dlp_base_args() + [
-        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
-        "--merge-output-format", "mp4",
+        "-S", "res:720,ext:mp4,+codec:h264",
         "-o", str(cached_path),
         "--no-playlist",
         youtube_url,
