@@ -191,8 +191,8 @@ def yt_dlp_base_args() -> list[str]:
         "--fragment-retries", "10",
         # Linear backoff between 5s and 30s — smooths out transient 429s.
         "--retry-sleep", "linear=5..30",
-        # YouTube is increasingly aggressive about bot detection.
-        "--force-user-agent",
+        # Realistic browser UA + lenient TLS for flaky egress IPs.
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "--no-check-certificates",
     ]
 
