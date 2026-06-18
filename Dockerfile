@@ -6,7 +6,8 @@ FROM python:3.12-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOST=0.0.0.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
@@ -18,12 +19,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App code
+# App code + entrypoint
 COPY . .
 
-# Predictable port for Railway
-ENV BACKEND_PORT=${BACKEND_PORT:-8000}
+# Guarantee LF line endings for the shell entrypoint (file may have CRLF on Windows).
+RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
+
+# Railway injects PORT automatically. Default to 8000 for local runs.
+ENV PORT=8000 \
+    BACKEND_PORT=8000
 EXPOSE 8000
 
-# Fast startup, single worker keeps memory low. Scale horizontally on Railway.
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8000} --workers 1"]
+# Use our entrypoint so PORT expansion actually happens (sh, not a frozen string).
+CMD ["./start.sh"]
