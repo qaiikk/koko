@@ -71,7 +71,14 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 @app.get("/health")
 async def health():
     """Liveness/readiness probe for Railway and browsers."""
-    return {"status": "ok", "service": "youtube-shorts-trimmer", "endpoints": ["/api/process", "/api/jobs", "/api/styles"]}
+    cp = getattr(config, "COOKIES_FILE", None)
+    has_cookies = cp and Path(cp).exists() and Path(cp).stat().st_size > 0
+    return {
+        "status": "ok",
+        "service": "youtube-shorts-trimmer",
+        "cookies_loaded": has_cookies,
+        "endpoints": ["/api/process", "/api/jobs", "/api/styles", "/api/cookies"],
+    }
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -79,6 +86,15 @@ async def health():
 def run_cmd(cmd: list[str], cwd: Optional[str] = None, timeout: int = 600) -> subprocess.CompletedProcess:
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, start_new_session=True)
     if result.returncode != 0:
+        # Detect YouTube's "Sign in to confirm you're not a bot" block.
+        # Retrying won't help — the user needs to provide cookies.
+        if _is_bot_block(result.stderr):
+            raise RuntimeError(
+                "YouTube is blocking this request (bot detection from cloud IP). "
+                "Upload a cookies.txt file via the /api/cookies endpoint first, "
+                "or include it with your request. "
+                "See: https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
+            )
         raise RuntimeError(f"Command failed: {' '.join(cmd[:3])}...\n{result.stderr[:500]}")
     return result
 
@@ -172,14 +188,34 @@ def _js_runtime() -> Optional[str]:
     return _JS_RUNTIME
 
 
+def _cookies_path() -> Optional[Path]:
+    """Return the path to cookies.txt if it exists and is non-empty."""
+    cp = getattr(config, "COOKIES_FILE", None)
+    if not cp:
+        return None
+    p = Path(cp)
+    if p.exists() and p.stat().st_size > 0:
+        return p
+    return None
+
+
+def _is_bot_block(stderr: str) -> bool:
+    """Detect YouTube's 'Sign in to confirm you're not a bot' error in yt-dlp output."""
+    return any(phrase in stderr for phrase in [
+        "Sign in to confirm you're not a bot",
+        "sign in to confirm",
+        "bot detection",
+        "ConsentRequired",
+    ])
+
+
 def yt_dlp_base_args() -> list[str]:
     """Common yt-dlp flags shared by every call.
 
-    - Picks whichever JS runtime is installed (instead of hardcoding `node`),
-      which fixes: "No supported JavaScript runtime could be found."
-    - Uses alternative YouTube player clients (android/ios/web) and retries
-      with linear backoff, which mitigates: "HTTP Error 429: Too Many Requests"
-      from Railway's shared egress IPs hitting the web player.
+    - Passes --cookies if a cookies.txt is available (required for cloud/Railway
+      where YouTube blocks datacenter IPs with "Sign in to confirm you're not a bot").
+    - Picks whichever JS runtime is installed (instead of hardcoding `node`).
+    - Uses alternative YouTube player clients and retries with linear backoff.
     """
     args = [
         "yt-dlp",
@@ -189,8 +225,7 @@ def yt_dlp_base_args() -> list[str]:
         "--extractor-args", "youtube:player_client=android,ios,web_default,web",
         "--retries", "10",
         "--fragment-retries", "10",
-        # Linear backoff (5s → 30s, 1s steps) between retries. Note: yt-dlp
-        # uses ':' as the separator inside linear=, not '..'.
+        # Linear backoff (5s → 30s, 1s steps) between retries.
         "--retry-sleep", "linear=5:30:1",
         # Realistic browser UA + lenient TLS for flaky egress IPs.
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -200,6 +235,13 @@ def yt_dlp_base_args() -> list[str]:
     runtime = _js_runtime()
     if runtime:
         args += ["--js-runtimes", runtime]
+
+    # Attach cookies if available — essential for Railway / cloud deployments
+    # where YouTube's bot detection blocks datacenter IPs entirely.
+    cookies_path = _cookies_path()
+    if cookies_path:
+        args += ["--cookies", str(cookies_path)]
+
     return args
 
 
@@ -820,6 +862,69 @@ async def download_all_clips(job_id: str, version: str = "captioned"):
 async def get_styles():
     """Return available caption styles."""
     return {k: {"name": v["name"]} for k, v in CAPTION_STYLES.items()}
+
+
+# ─── Cookies Management ───────────────────────────────────────────────────────
+
+@app.post("/api/cookies")
+async def upload_cookies(file: UploadFile = File(...)):
+    """Upload a YouTube cookies.txt file (Netscape format).
+
+    Required for cloud/Railway deployments where YouTube blocks datacenter IPs.
+    Generate cookies.txt from your browser using an extension like
+    "Get cookies.txt LOCALLY" (export from youtube.com while logged in).
+
+    The file is saved to the persistent path configured by COOKIES_FILE.
+    """
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+
+    cookies_path = Path(config.COOKIES_FILE)
+    cookies_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cookies_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    if cookies_path.stat().st_size == 0:
+        cookies_path.unlink(missing_ok=True)
+        raise HTTPException(400, "Uploaded cookies file is empty")
+
+    return {
+        "status": "ok",
+        "message": f"Cookies saved ({cookies_path.stat().st_size} bytes). YouTube downloads should now work.",
+        "path": str(cookies_path),
+    }
+
+
+@app.get("/api/cookies")
+async def cookies_status():
+    """Check if cookies are loaded and active."""
+    cp = _cookies_path()
+    if cp:
+        return {
+            "status": "loaded",
+            "message": "YouTube cookies are active.",
+            "path": str(cp),
+            "size_bytes": cp.stat().st_size,
+        }
+    return {
+        "status": "missing",
+        "message": (
+            "No cookies.txt found. YouTube downloads will likely fail with "
+            "'Sign in to confirm you're not a bot' on cloud/Railway deployments. "
+            "Upload a cookies.txt via POST /api/cookies."
+        ),
+        "path": str(config.COOKIES_FILE),
+    }
+
+
+@app.delete("/api/cookies")
+async def delete_cookies():
+    """Remove the stored cookies file."""
+    cp = Path(config.COOKIES_FILE)
+    if cp.exists():
+        cp.unlink()
+        return {"status": "ok", "message": "Cookies file removed."}
+    return {"status": "ok", "message": "No cookies file to remove."}
 
 
 @app.post("/api/process")
