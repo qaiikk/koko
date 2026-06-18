@@ -189,8 +189,9 @@ def yt_dlp_base_args() -> list[str]:
         "--extractor-args", "youtube:player_client=android,ios,web_default,web",
         "--retries", "10",
         "--fragment-retries", "10",
-        # Linear backoff between 5s and 30s — smooths out transient 429s.
-        "--retry-sleep", "linear=5..30",
+        # Linear backoff (5s → 30s, 1s steps) between retries. Note: yt-dlp
+        # uses ':' as the separator inside linear=, not '..'.
+        "--retry-sleep", "linear=5:30:1",
         # Realistic browser UA + lenient TLS for flaky egress IPs.
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "--no-check-certificates",
