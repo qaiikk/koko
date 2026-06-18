@@ -13,15 +13,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# yt-dlp needs a JavaScript runtime for YouTube extraction. Install Node.js
-# (primary) and Bun (fallback) so the "No supported JavaScript runtime"
-# error never happens. Keep these on one layer to minimize image size.
+# yt-dlp needs a JavaScript runtime for YouTube extraction. Node.js is enough.
+# (Bun was tried as a fallback but its installer needs `unzip`, which bloats
+# the image — Node alone covers every yt-dlp code path.)
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && curl -fsSL https://bun.sh/install | bash \
     && rm -rf /var/lib/apt/lists/*
-ENV BUN_INSTALL="/root/.bun"
-ENV PATH="${BUN_INSTALL}/bin:${PATH}"
 
 WORKDIR /app
 
