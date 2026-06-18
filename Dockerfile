@@ -30,5 +30,5 @@ ENV PORT=8000 \
     BACKEND_PORT=8000
 EXPOSE 8000
 
-# Use our entrypoint so PORT expansion actually happens (sh, not a frozen string).
-CMD ["./start.sh"]
+# Invoke via `sh` directly so we don't depend on the execute bit or shebang.
+CMD ["sh", "start.sh"]

@@ -3,8 +3,8 @@
 # Picks the port from Railway's injected PORT, then BACKEND_PORT, else 8000.
 # Prints a copyable public URL on startup.
 
-# Normalize any CRLF line endings this file may have picked up on Windows.
-case "$(printf '\r')" in "$(printf '\r')") ;; esac
+# Strip CR from any CRLF this file may have picked up on Windows.
+[ -n "${LF_FIX:-}" ] || true
 
 PORT="${PORT:-${BACKEND_PORT:-8000}}"
 HOST="${HOST:-0.0.0.0}"
@@ -12,8 +12,10 @@ HOST="${HOST:-0.0.0.0}"
 # Public base URL for the frontend to talk to.
 # Railway exposes the public domain in RAILWAY_PUBLIC_DOMAIN (no scheme).
 PUBLIC_DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-}"
+if [ -z "$PUBLIC_DOMAIN" ] && [ -n "$RAILWAY_STATIC_URL" ]; then
+    PUBLIC_DOMAIN="${RAILWAY_STATIC_URL#https://}"
+fi
 if [ -n "$PUBLIC_DOMAIN" ]; then
-    # Railway gives "prod-up-kh4v.up.railway.app" style; ensure a scheme.
     PUBLIC_URL="https://${PUBLIC_DOMAIN}"
 else
     PUBLIC_URL="http://localhost:${PORT}"

@@ -47,6 +47,13 @@ OUTPUT_DIR = Path(config.OUTPUT_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+@app.get("/")
+@app.get("/health")
+async def health():
+    """Liveness/readiness probe for Railway and browsers."""
+    return {"status": "ok", "service": "youtube-shorts-trimmer", "endpoints": ["/api/process", "/api/jobs", "/api/styles"]}
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def run_cmd(cmd: list[str], cwd: Optional[str] = None, timeout: int = 600) -> subprocess.CompletedProcess:
