@@ -13,14 +13,16 @@ import glob
 import json
 import os
 import re
+import random
 import shutil
 import subprocess
 import uuid
 import asyncio
 import zipfile
+import urllib.request
 from pathlib import Path
 from typing import Optional, AsyncGenerator
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -123,6 +125,77 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # URL -> cached video path mapping
 url_cache: dict[str, Path] = {}
+
+# ─── Smart Proxy Rotation ─────────────────────────────────────────────────────
+
+PROXY_LIST_URLS = [
+    "https://github.com/zloi-user/hideip.me/raw/refs/heads/main/http.txt",
+    "https://github.com/zloi-user/hideip.me/raw/refs/heads/main/https.txt",
+]
+
+# In-memory proxy pool: (proxy, last_tested, working)
+_proxy_pool: list[tuple[str, datetime, bool]] = []
+_last_proxy_fetch: Optional[datetime] = None
+_PROXY_CACHE_TTL = timedelta(minutes=30)
+
+
+def _fetch_proxies() -> list[str]:
+    """Fetch proxy list from hideip.me and return shuffled list."""
+    proxies = []
+    for url in PROXY_LIST_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+                # Parse lines like "ip:port" or "https://ip:port"
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line and ":" in line and not line.startswith("#"):
+                        # Normalize to https://ip:port format for yt-dlp
+                        if not line.startswith("http"):
+                            line = f"https://{line}"
+                        proxies.append(line)
+        except Exception:
+            continue
+    random.shuffle(proxies)
+    return proxies
+
+
+def get_proxy() -> Optional[str]:
+    """Get a working proxy from the pool. Fetches new proxies if pool is empty or stale."""
+    global _last_proxy_fetch, _proxy_pool
+
+    now = datetime.now()
+    # Refetch if stale or empty
+    if not _proxy_pool or not _last_proxy_fetch or (now - _last_proxy_fetch) > _PROXY_CACHE_TTL:
+        fresh = _fetch_proxies()
+        _proxy_pool = [(p, now, True) for p in fresh]
+        _last_proxy_fetch = now
+
+    # Return first untested or recently-working proxy
+    for i, (proxy, tested, working) in enumerate(_proxy_pool):
+        if not tested or working:
+            return proxy
+
+    # All proxies tested and failed — refetch
+    _proxy_pool = [(p, now, True) for p in _fetch_proxies()]
+    _last_proxy_fetch = now
+    if _proxy_pool:
+        return _proxy_pool[0][0]
+    return None
+
+
+def mark_proxy_failed(proxy: str):
+    """Mark a proxy as failed so we try the next one."""
+    global _proxy_pool
+    _proxy_pool = [(p, t, False) if p == proxy else (p, t, w) for p, t, w in _proxy_pool]
+
+
+def mark_proxy_working(proxy: str):
+    """Mark a proxy as working."""
+    global _proxy_pool
+    now = datetime.now()
+    _proxy_pool = [(p, now, True) if p == proxy else (p, t, w) for p, t, w in _proxy_pool]
 
 
 def get_video_id(url: str) -> str:
@@ -295,7 +368,7 @@ def fetch_video_metadata(youtube_url: str) -> dict:
 
 
 def download_video(youtube_url: str, job_dir: Path) -> Path:
-    """Download YouTube video with caching. Returns cached file if already downloaded."""
+    """Download YouTube video with caching and smart proxy rotation. Returns cached file if already downloaded."""
     vid = get_video_id(youtube_url)
     cached_path = CACHE_DIR / f"{vid}.mp4"
 
@@ -314,25 +387,52 @@ def download_video(youtube_url: str, job_dir: Path) -> Path:
             os.symlink(cached.resolve(), job_video)
         return job_video
 
-    # Download to cache (retries + alt clients are baked into base args)
-    # Use -S (format sorting) so yt-dlp picks the best available combo automatically.
-    # This avoids "Requested format not available" errors by letting yt-dlp decide.
-    cmd = yt_dlp_base_args() + [
+    # Build base command (retries + alt clients are baked into base args)
+    base_cmd = yt_dlp_base_args() + [
         "-S", "res:720,ext:mp4,+codec:h264",
         "-o", str(cached_path),
         "--no-playlist",
         youtube_url,
     ]
-    run_cmd(cmd, timeout=300)
-    if not cached_path.exists():
-        raise RuntimeError("Download failed - video file not found")
 
-    url_cache[youtube_url] = cached_path
+    # Try 1: Download without proxy
+    try:
+        run_cmd(base_cmd, timeout=300)
+        if cached_path.exists():
+            url_cache[youtube_url] = cached_path
+            job_video = job_dir / "source.mp4"
+            if not job_video.exists():
+                os.symlink(cached_path.resolve(), job_video)
+            return job_video
+    except RuntimeError as e:
+        if not _is_bot_block(str(e)):
+            raise  # Not a bot block — rethrow
 
-    job_video = job_dir / "source.mp4"
-    if not job_video.exists():
-        os.symlink(cached_path.resolve(), job_video)
-    return job_video
+    # Try 2-N: Download with proxy rotation (max 5 proxies)
+    max_proxies = 5
+    for attempt in range(max_proxies):
+        proxy = get_proxy()
+        if not proxy:
+            break
+
+        cmd = base_cmd + ["--proxy", proxy, "--no-check-certificates"]
+        try:
+            run_cmd(cmd, timeout=300)
+            if cached_path.exists():
+                mark_proxy_working(proxy)
+                url_cache[youtube_url] = cached_path
+                job_video = job_dir / "source.mp4"
+                if not job_video.exists():
+                    os.symlink(cached_path.resolve(), job_video)
+                return job_video
+        except RuntimeError as e:
+            mark_proxy_failed(proxy)
+            if not _is_bot_block(str(e)):
+                raise  # Not a bot block — rethrow
+            # Try next proxy
+            continue
+
+    raise RuntimeError("Download failed — YouTube bot detection blocked all attempts. Try re-exporting fresh cookies.")
 
 
 def save_uploaded_file(upload: UploadFile, job_dir: Path) -> Path:
